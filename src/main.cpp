@@ -31,6 +31,31 @@ float roll = 0.0f;
 float velocityX = 0.0f;   // in m/s
 float offset_ax, offset_ay, offset_az, offset_gz;
 
+// Timing control using Timer2
+volatile uint32_t system_millis = 0;
+volatile uint8_t imu_ready = 0;
+volatile uint8_t us_left_trigger = 0;
+volatile uint8_t us_right_trigger = 0;
+
+// Sensor data buffers (latest values)
+volatile uint16_t latest_ir_distance = 0;
+volatile uint32_t latest_left_distance = 9999;
+volatile uint32_t latest_right_distance = 9999;
+
+// Task scheduling intervals (in milliseconds)
+#define IMU_UPDATE_INTERVAL 5      // 200Hz
+#define US_UPDATE_INTERVAL 50      // 20Hz
+#define IR_UPDATE_INTERVAL 50      // 20Hz
+#define CONTROL_UPDATE_INTERVAL 10 // 100Hz - Control loop
+
+uint32_t last_imu_time = 0;
+uint32_t last_us_time = 0;
+uint32_t last_ir_time = 0;
+uint32_t last_control_time = 0;
+
+// System states
+int sys_state = 0; // 0 -> starting state, 1 -> forward state, 2 -> turning state, 3 -> finish state
+
 void setup() {
     // Init UART
     UBRR0H = 0;
@@ -414,7 +439,7 @@ void calibration() {
     uartPrint("Calibrating ... Please do not move IMU\r\n");
 
     int bufferSize = 1000;
-    float buff_ax=0.0f, buff_ay=0.0f, buff_az=0.0f, buff_gx=0.0f, buff_gy=0.0f ,buff_gz=0.0f;
+    float buff_ax=0.0f, buff_ay=0.0f, buff_az=0.0f, buff_gz=0.0f;
     int i = 0;
 
     while (i < (bufferSize + 101)) {
@@ -465,24 +490,27 @@ int main() {
     // ---------------- SYSTEM INIT ---------------- //
 	setup();
     _delay_ms(5);
-    i2c_init();
+    //i2c_init();
     _delay_ms(5);
-    ADC_init();
+    //ADC_init();
     _delay_ms(5);
-    mpu6050_init();
+    //mpu6050_init();
     _delay_ms(5);
-    calibration();
+    //calibration();
     sei();
     uartPrint("Hovercraft Initialized ! \r\n");
 
     int print_counter = 0;
 
     // Main loop
-	while (1)
+    int start_counter = 0;
+    int bar_counter = 0;
+
+    while (1)
 	{
         // ---------------- READ SENSORS ---------------- // 
         // Time tracker
-        uint32_t current_time = system_millis;
+        /* uint32_t current_time = system_millis;
     
         update_imu();
         
@@ -491,11 +519,11 @@ int main() {
         check_ultrasonic_left();
         check_ultrasonic_right();
         
-        update_ir();
+        update_ir(); */
 
         // ---------------- DEBUGGING ---------------- // 
         // Print every 500ms
-        if (++print_counter >= 50) {
+        /* if (++print_counter >= 50) {
             print_counter = 0;
             // Print IMU data (acceleration and yaw)
             uartPrint("Acc X:");
@@ -516,9 +544,92 @@ int main() {
             uartPrint("cm IR:");
             uartPrintInt(latest_ir_distance);
             uartPrint("cm\r\n");
+        } */
+
+        /* startLiftFan();
+        setThrustFan(220);
+        _delay_ms(20000);
+        stopLiftFan();
+        setThrustFan(0);
+        _delay_ms(5000); */
+
+        // ---------------- ALGORITHM ---------------- //
+        switch (sys_state)
+        {
+        case 0: // Starting state
+            startLiftFan();
+            set_servo_angle(0);
+            setThrustFan(220);
+
+            start_counter++;
+
+            if (start_counter > 1000)
+            {
+                sys_state = 1; // After 1 sec -> change to foward state
+            }
+            break;
+
+        case 1: // Foward state
+            // TODO: Hovercraft stabilization
+
+            // Slow down if opening found
+            if (latest_left_distance > latest_right_distance + 10.0 || latest_right_distance > latest_left_distance + 10.0) 
+            {
+                setThrustFan(80);
+            }
+            
+            // Turn state if hovercraft hits wall
+            if (accX < 0.2 && accY < 0.2) 
+            {
+                setThrustFan(0);
+                sys_state = 2;
+            }
+
+            if (latest_ir_distance < 100.0) // Check if bar detected more than 3 frames
+            {
+                bar_counter++;
+                if (bar_counter > 3)
+                {
+                    sys_state = 3;
+                }
+                
+            }
+            
+            break;
+
+        case 2: // Turning state
+            if (latest_left_distance > latest_right_distance + 10.0)
+            {
+                set_servo_angle(-180);
+                setThrustFan(220);
+
+                if (gyrZ > -85 || gyrZ < -95) // Hovercraft finished turning left -> go back to foward state
+                {
+                    sys_state = 1;
+                }
+            } else if (latest_right_distance > latest_left_distance + 10.0)
+            {
+                set_servo_angle(180);
+                setThrustFan(220);
+
+                if (gyrZ > 85 || gyrZ < 95) // Hovercraft finished turning right -> go back to foward state
+                {
+                    sys_state = 1;
+                }
+            }
+            
+            
+            break;
+
+        case 3: // Finish state state
+            stopLiftFan();
+            set_servo_angle(0);
+            setThrustFan(0);
+            break;
+        
+        default:
+            break;
         }
 
-        // ---------------- ALGORITHM ---------------- // 
-        
     }
 }
