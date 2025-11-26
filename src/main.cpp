@@ -7,7 +7,7 @@
 
 // ---------------- Pin Defines ---------------- //
 #define LIFT_FAN PD4
-#define FAN_THRUST_PIN PD6  // OC0A
+#define FAN_THRUST_PIN PD5  // OC0B
 
 #define TRIG_PIN_LEFT PB3
 #define ECHO_PIN_LEFT PD2   // INT0
@@ -20,8 +20,20 @@
 
 #define IMU_ADDR 0x68
 
-int system_state = 0; // 0 -> forward, 1 -> turning, 2 -> stopping
-int turning_state = 0; // 1 -> right, 2 -> left
+typedef enum
+{
+    FORWARD,
+    TURNING,
+    STOPPING
+} SYS_STATE;
+
+typedef enum
+{
+    STRAIGHT,
+    LEFT,
+    RIGHT
+} TURN_DIRECTION;
+
 float system_yaw = 0;
 
 // ---------------- IMU Variables ---------------- //
@@ -265,18 +277,9 @@ void servo_init() {
 }
 
 void set_servo_angle(float angle) {
-    // Constrain angle to -90 to +90 degrees
-    if (angle < -90.0f) angle = -90.0f;
-    if (angle > 90.0f) angle = 90.0f;
-    
-    // Map angle to pulse width:
-    // -90° → 1000µs → 2000 ticks
-    //   0° → 1500µs → 3000 ticks
-    // +90° → 2000µs → 4000 ticks
-    
-    // Formula: pulseWidth = 1500 + (angle * 500/90)
-    // In timer ticks (0.5µs each): ticks = pulseWidth * 2
-    
+    if (angle > 180) angle = 180;
+    if (angle < -180) angle = -180;
+
     float pulse_us = 1500.0f + (angle * (500.0f / 90.0f));
     uint16_t ticks = (uint16_t)(pulse_us * 2.0f);
     
@@ -286,19 +289,14 @@ void set_servo_angle(float angle) {
 // ---------------- Fan Control ---------------- //
 void startLiftFan() {
     PORTD |= (1 << LIFT_FAN);
-    uartPrint("  > Lift fan ON (PD4 HIGH)\r\n");
 }
 
 void stopLiftFan() {
     PORTD &= ~(1 << LIFT_FAN);
-    uartPrint("  > Lift fan OFF (PD4 LOW)\r\n");
 }
 
 void setThrustFan(uint8_t speed) {
-    OCR0A = speed;
-    uartPrint("  > Thrust fan PWM: ");
-    uartPrintInt(speed);
-    uartPrint("/255\r\n");
+    OCR0B = speed;
 }
 
 // ---------------- IMU Functions ---------------- //
@@ -312,30 +310,8 @@ void mpu6050_init(void) {
     i2c_write(0x00);  // Clear sleep bit
     i2c_stop();
     _delay_ms(100);
-    
-    // Verify WHO_AM_I register
-    uartPrint("Reading WHO_AM_I...\r\n");
-    i2c_start();
-    i2c_write((IMU_ADDR << 1) | 0);
-    i2c_write(0x75);  // WHO_AM_I register
-    i2c_start();
-    i2c_write((IMU_ADDR << 1) | 1);
-    uint8_t who_am_i = i2c_read_nack();
-    i2c_stop();
-    
-    uartPrint("WHO_AM_I = 0x");
-    char buf[4];
-    itoa(who_am_i, buf, 16);
-    uartPrint(buf);
-    uartPrint(" (should be 0x68)\r\n");
-    
-    if (who_am_i != 0x68 && who_am_i != 0x72) {
-        uartPrint("ERROR: MPU6050 not responding correctly!\r\n");
-        return;
-    }
 
     // Set gyroscope range to ±500°/s
-    uartPrint("Configuring gyroscope...\r\n");
     i2c_start();
     i2c_write((IMU_ADDR << 1) | 0);
     i2c_write(0x1B);  // GYRO_CONFIG register
@@ -344,7 +320,6 @@ void mpu6050_init(void) {
     _delay_ms(10);
 
     // Set accelerometer range to ±4g
-    uartPrint("Configuring accelerometer...\r\n");
     i2c_start();
     i2c_write((IMU_ADDR << 1) | 0);
     i2c_write(0x1C);  // ACCEL_CONFIG register
@@ -384,7 +359,6 @@ void readIMURaw() {
 
 void calibrateIMU() {
     uartPrint("=== Calibrating IMU ===\r\n");
-    uartPrint("Keep the sensor STILL!\r\n");
     
     float sum_ax = 0, sum_ay = 0, sum_az = 0, sum_gz = 0;
     
@@ -394,36 +368,22 @@ void calibrateIMU() {
         _delay_ms(5);
     }
     
-    // Next 500 readings for calibration
-    uartPrint("Collecting calibration data...\r\n");
-    for (int i = 0; i < 500; i++) {
+    for (int i = 0; i < 200; i++) {
         readIMURaw();
         sum_ax += accX;
         sum_ay += accY;
         sum_az += accZ;
         sum_gz += gyrZ;
         
-        if (i % 100 == 0) {
-            uartPrint(".");
-        }
         _delay_ms(5);
     }
     
-    offset_ax = sum_ax / 500.0f;
-    offset_ay = sum_ay / 500.0f;
-    offset_az = (sum_az / 500.0f) - 1.0f;  // Subtract 1g
-    offset_gz = sum_gz / 500.0f;
+    offset_ax = sum_ax / 200.0f;
+    offset_ay = sum_ay / 200.0f;
+    offset_az = (sum_az / 200.0f) - 1.0f;  // Subtract 1g
+    offset_gz = sum_gz / 200.0f;
     
     uartPrint("\r\nCalibration complete!\r\n");
-    uartPrint("Offsets - AX:");
-    uartPrintFloat(offset_ax);
-    uartPrint(" AY:");
-    uartPrintFloat(offset_ay);
-    uartPrint(" AZ:");
-    uartPrintFloat(offset_az);
-    uartPrint(" GZ:");
-    uartPrintFloat(offset_gz);
-    uartPrint("\r\n\r\n");
 }
 
 void readIMU() {
@@ -446,12 +406,11 @@ void setup() {
     DDRD |= (1 << LIFT_FAN);
     PORTD &= ~(1 << LIFT_FAN);
 
-    // ===== THRUST FAN (PD6 / OC0A) - Timer0 Fast PWM ===== //
+    // ===== THRUST FAN (PD5 / OC0B) - Timer0 Fast PWM ===== //
     DDRD |= (1 << FAN_THRUST_PIN);
-    TCCR0A = (1 << COM0A1) | (1 << WGM01) | (1 << WGM00);  // Fast PWM, non-inverting
+    TCCR0A = (1 << COM0B1) | (1 << WGM01) | (1 << WGM00);  // Fast PWM on OC0B, non-inverting
     TCCR0B = (1 << CS01) | (1 << CS00);  // Prescaler 64 (for PWM and micros())
-    OCR0A = 0;
-    // Enable Timer0 overflow interrupt for micros()
+    OCR0B = 0;  // CHANGED: Use OCR0B
     TIMSK0 = (1 << TOIE0);
 
     // ===== SERVO - Initialize with hardware PWM ===== //
@@ -475,6 +434,10 @@ void setup() {
     sei();
 }
 
+// Add these variables at the top with your other globals
+float target_yaw = 0.0f;
+unsigned long turn_start_time = 0;
+
 int main() {
     setup();
     _delay_ms(100);
@@ -489,6 +452,12 @@ int main() {
     
     unsigned long last_print = 0;
     unsigned long last_us = 0;
+
+    SYS_STATE system_state = FORWARD;
+    TURN_DIRECTION turning_state = STRAIGHT;
+
+    int turning_counter = 0;
+    int servo_counter = 0;
 
     startLiftFan();
 
@@ -534,81 +503,115 @@ int main() {
             uartPrintInt(ir_distance);
             uartPrint("cm | Yaw:");
             uartPrintFloat(yaw);
-            uartPrint("° | GyrZ:");
-            uartPrintFloat(gyrZ);
-            uartPrint(" AccX:");
+            uartPrint("| Acc X:");
             uartPrintFloat(accX);
+            uartPrint("| Acc Y:");
+            uartPrintFloat(accY);
             uartPrint("\r\n");
             
             last_print = now;
         }
 
         // ---------------- Algorithm ---------------- //
-        switch (system_state)
+        switch(system_state)
         {
-        case 0: // Forward state
-            setThrustFan(200);
+            case FORWARD: {// Forward state
+            setThrustFan(255);
 
-            // TODO : Stabilization using IMU
-
-            // On hit wall -> turning decision then change state
-            if (accX < 0.15 && accY < 0.15)
+            float yaw_error = yaw - system_yaw;
+            float servo_correction = yaw_error * 3.5f;
+            
+            // Clamp servo correction
+            if (servo_correction > 45) servo_correction = 45;
+            if (servo_correction < -45) servo_correction = -45;
+            set_servo_angle(servo_correction);
+        
+            // turning decision then change state
+            if ((left_distance > 80.0) && (left_distance != 9999))
             {
+                turning_counter++;
+                if (turning_counter > 3)
+                {
+                    system_yaw = yaw;
+                    target_yaw = yaw + 20.0f;
+                    
+                    turning_state = LEFT;
+                    system_state = TURNING;
+                    turn_start_time = now;
+                }
+            } 
+            else if ((right_distance > 80.0) && (right_distance != 9999)) 
+            {
+                turning_counter++;
+                if (turning_counter > 3)
+                {
+                    // IMPORTANT: Save current yaw as reference
+                    system_yaw = yaw;
+                    target_yaw = yaw - 20.0f;
+                    
+                    turning_state = RIGHT;
+                    system_state = TURNING;
+                    turn_start_time = now;
+                }
+            }
+            else
+            {
+                // Reset counter if conditions not met
+                turning_counter = 0;
+            }
+            
+            break; }
+        
+        case TURNING: { // Turning state            
+            if (turning_state == LEFT)
+            {
+                setThrustFan(250);
+                set_servo_angle(servo_counter);
+                servo_counter -= 1;
+
+                if (yaw >= target_yaw || (now - turn_start_time > 10000))
+                {
+                    set_servo_angle(0);
+                    system_yaw = yaw;
+                    turning_state = STRAIGHT;
+                    system_state = FORWARD;
+                    turning_counter = 0;
+                    servo_counter = 0;
+                }
+            } 
+            else if (turning_state == RIGHT) 
+            {
+                set_servo_angle(servo_counter);
+                setThrustFan(250);
+                servo_counter += 1;
+
+                if (yaw <= target_yaw || (now - turn_start_time > 10000))
+                {
+                    set_servo_angle(0);
+                    system_yaw = yaw;
+                    turning_state = STRAIGHT;
+                    system_state = FORWARD;
+                    turning_counter = 0;
+                    servo_counter = 0;
+                }
+            }
+            else
+            {
+                system_state = FORWARD;
+                turning_state = STRAIGHT;
+            }
+            
+            break; }
+        
+            case STOPPING: { // Stopping state
+                set_servo_angle(0.0);
                 setThrustFan(0);
-                if (left_distance > right_distance + 10.0)
-                {
-                    turning_state = 2;
-                    system_state = 2;
-                } else if (left_distance + 10.0 < right_distance) {
-                    turning_state = 1;
-                }
-            }
-
-            if (ir_distance < 50.0)
-            {
-                system_state = 2;
-            }
+                stopLiftFan();
+                break; }
             
-            break;
-        
-        case 1: // Turning state
-            if (turning_state == 2) // left
-            {
-                if (yaw < system_yaw - 90)
-                {
-                    set_servo_angle(-90);
-                    setThrustFan(200);
-                } else if(yaw >= system_state - 90){ // finished turning left
-                    system_yaw -= 90;
-                    set_servo_angle(0);
-                    system_state = 0;
-                }
-            } else if(turning_state == 1) { // right
-                if (yaw < system_yaw + 90)
-                {
-                    set_servo_angle(90);
-                    setThrustFan(200);
-                } else if(yaw >= system_state + 90){ // finished turning right
-                    system_yaw += 90;
-                    set_servo_angle(0);
-                    system_state = 0;
-                }
-            } else {
-                system_state = 0;
-            }
-            
-            break;
-
-        case 2: // Stopping state
-            set_servo_angle(0);
-            setThrustFan(0);
-            stopLiftFan();
-            break;
-        
-        default:
-            break;
+            default:
+                break;
         }
     }
-    
     return 0;
 }
